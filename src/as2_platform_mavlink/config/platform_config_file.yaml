@@ -1,0 +1,75 @@
+/**:
+  ros__parameters:
+    # ------------------------------------------------------------------
+    # Platform loop rates
+    # ------------------------------------------------------------------
+    # cmd_freq is the rate at which the platform streams setpoints to the
+    # autopilot. ArduPilot stops the vehicle 3 s after the last velocity or
+    # acceleration setpoint, so this must stay well above 1 Hz. 50 Hz is a
+    # good compromise between tracking quality and MAVLink link load; going
+    # above 100 Hz only makes sense over a fast (UDP / USB) link.
+    cmd_freq: 50.0  # Hz of platform commands sent to the autopilot
+    info_freq: 10.0  # Hz of platform info publish
+
+    # ------------------------------------------------------------------
+    # Autopilot
+    # ------------------------------------------------------------------
+    autopilot: "ardupilot"  # "ardupilot" or "px4"
+    vehicle_type: "copter"  # only multirotors are implemented
+
+    modes:
+      offboard: "GUIDED"  # mode in which the autopilot accepts onboard setpoints
+      manual: "LOITER"  # mode entered when Aerostack2 releases offboard control
+      hold: "BRAKE"  # mode entered on an EMERGENCY_HOVER alert
+
+    # ArduPilot reads the SET_ATTITUDE_TARGET thrust field as a climb rate
+    # unless GUID_OPTIONS bit 3 (value 8) is set. Only switch this to
+    # "normalized_thrust" if that autopilot parameter has been set.
+    attitude_thrust_semantics: "climb_rate"
+
+    # Thrust limits, only used by the ATTITUDE control mode.
+    max_thrust: 0.0  # Max thrust of the platform (N), 0 disables ATTITUDE mode
+    min_thrust: 0.0  # Min normalized thrust sent to the platform
+
+    # Arming as a side effect of entering offboard control is opt-in.
+    arm_on_offboard: false
+
+    connection:
+      timeout: 2.0  # s without MAVROS state before the platform reports disconnected
+
+    control:
+      command_timeout: 0.5  # s, stop streaming setpoints if references get older
+      mode_change_timeout: 5.0  # s to wait for the autopilot to confirm a mode change
+
+    # ------------------------------------------------------------------
+    # Takeoff / landing performed by the autopilot
+    # ------------------------------------------------------------------
+    # ArduPilot Copter will not leave the ground in GUIDED until it receives
+    # MAV_CMD_NAV_TAKEOFF, so takeoff and landing are delegated to the
+    # autopilot through the "takeoff_plugin_platform" / "land_plugin_platform"
+    # behavior plugins. Those plugins call a std_srvs/SetBool service which
+    # carries no payload, so the takeoff height comes from this file and NOT
+    # from the Takeoff action goal.
+    takeoff:
+      height: 1.0  # m above the current position
+      height_tolerance: 0.15  # m
+      timeout: 30.0  # s
+      blocking: true  # report success only once the height is reached
+    land:
+      timeout: 60.0  # s
+
+    # ------------------------------------------------------------------
+    # Trajectory streaming
+    # ------------------------------------------------------------------
+    trajectory:
+      # Send the acceleration feed-forward of the trajectory reference.
+      # Supported by ArduPilot Copter 4.1 and newer.
+      send_acceleration: true
+      # Must match the sampling_dt of the trajectory generation behavior. Only
+      # used when the behavior emits more than one setpoint per message.
+      sampling_dt: 0.01
+
+    # ------------------------------------------------------------------
+    # Odometry
+    # ------------------------------------------------------------------
+    external_odom: false  # publish the Aerostack2 state estimate to the autopilot

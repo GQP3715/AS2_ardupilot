@@ -1,0 +1,26 @@
+# ArduPilot SITL + Gazebo simulation description.
+#
+# Every drone maps to one `sim_vehicle.py` instance. Instance N uses the
+# Gazebo FDM ports 9002+10*N / 9003+10*N and the MAVProxy master port
+# 5760+10*N, so the instances never collide.
+#
+# `mavros_out` must match the fcu_url of the matching drone namespace in
+# config/config.yaml:
+#     --out=udp:127.0.0.1:14551   <->   fcu_url: "udp://:14551@127.0.0.1:14555"
+
+world: "iris_runway" # Gazebo world shipped with ardupilot_gazebo
+vehicle: "ArduCopter" # ArduPilot vehicle binary
+frame: "gazebo-iris" # SITL frame, must match the Gazebo model
+
+drones:
+  - namespace: "drone0" # Namespace of the drone in ROS 2
+    instance: 0 # sim_vehicle.py instance (-I)
+    sysid: 1 # MAVLink system id, must equal tgt_system + 0 (instance + 1)
+    mavros_out: "udp:127.0.0.1:14551" # MAVProxy output consumed by MAVROS
+    mavros_in_port: 14555 # Local port MAVROS sends from
+
+  # - namespace: "drone1"
+  #   instance: 1
+  #   sysid: 2
+  #   mavros_out: "udp:127.0.0.1:14561"
+  #   mavros_in_port: 14565

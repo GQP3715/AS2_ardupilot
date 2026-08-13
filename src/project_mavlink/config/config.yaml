@@ -1,0 +1,125 @@
+/**:
+  # Global Parameters
+  ros__parameters:
+    tf_timeout_threshold: 0.05
+
+  # Basic Robotics Functions
+  # Platform
+  platform:
+    ros__parameters:
+      # Rate at which SET_POSITION_TARGET_LOCAL_NED messages are streamed to
+      # ArduPilot. Must stay above 1 Hz (ArduPilot stops the vehicle 3 s after
+      # the last velocity/acceleration setpoint).
+      cmd_freq: 50.0
+      autopilot: "ardupilot"
+      vehicle_type: "copter"
+      modes:
+        offboard: "GUIDED"
+        manual: "LOITER"
+        hold: "BRAKE"
+      # Height of the autopilot side takeoff (MAV_CMD_NAV_TAKEOFF). The
+      # Takeoff action goal height is NOT forwarded by takeoff_plugin_platform,
+      # so keep this consistent with the missions.
+      takeoff:
+        height: 1.0
+        blocking: true
+      trajectory:
+        send_acceleration: true
+        sampling_dt: 0.01
+      control:
+        command_timeout: 0.5
+      # # Indoor RealSense / motion capture: feed the AS2 estimate back to the
+      # # autopilot as VISION_POSITION_ESTIMATE (requires EK3_SRC*_POSXY = 6).
+      # external_odom: true
+
+  # State Estimator
+  state_estimator:
+    ros__parameters:
+      # Outdoor (GPS) raw odometry. The odometry comes from
+      # mavros/local_position/odom, which is the ENU frame anchored at the
+      # ArduPilot EKF origin.
+      plugin_name: "raw_odometry"
+      use_gps: true
+      set_origin_on_start: true
+
+  # Motion Controller
+  # The platform exposes POSITION, SPEED and TRAJECTORY control modes, so the
+  # controller runs in bypass mode and forwards the references untouched:
+  # ArduPilot's own position controller does the tracking. The plugin below is
+  # only loaded as a fallback and is not used while bypass is active.
+  controller_manager:
+    ros__parameters:
+      use_bypass: true
+
+  # Behaviors Motion
+  TakeoffBehavior:
+    ros__parameters:
+      # ArduPilot Copter does not leave the ground in GUIDED from position or
+      # velocity setpoints, it needs MAV_CMD_NAV_TAKEOFF, which the platform
+      # sends through the platform takeoff service.
+      takeoff_plugin_name: "takeoff_plugin_platform"
+  LandBehavior:
+    ros__parameters:
+      # MAV_CMD_NAV_LAND, executed by the autopilot LAND mode.
+      land_plugin_name: "land_plugin_platform"
+  GoToBehavior:
+    ros__parameters:
+      # Trajectory plugins keep the motion smooth: the trajectory generator
+      # produces position + velocity + acceleration references that the
+      # platform forwards to ArduPilot as a single setpoint stream.
+      go_to_plugin_name: "go_to_plugin_trajectory"
+  FollowPathBehavior:
+    ros__parameters:
+      follow_path_plugin_name: "follow_path_plugin_trajectory"
+
+  # Trajectory generation
+  TrajectoryGeneratorBehavior:
+    ros__parameters:
+      plugin_name: "jerk_limited_trajectory_generator"
+      desired_frame_id: "odom"
+      # One setpoint per cycle: the platform re-streams the latest reference at
+      # cmd_freq. Raise sampling_n (and keep platform trajectory.sampling_dt in
+      # sync) to let the platform interpolate a short horizon instead.
+      sampling_n: 1
+      sampling_dt: 0.01
+      jerk_limited_trajectory_generator:
+        limits:
+          max_speed: 1.0  # m/s
+          max_acceleration: 2.0  # m/s^2, keep below the ArduPilot WPNAV limits
+          max_jerk: 5.0  # m/s^3
+
+  # Hardware Interfaces
+  usb_camera_interface:
+    ros__parameters:
+      device: "/dev/video0"
+      framerate: 30.0 # Frame rate of the camera (fps)
+      # Camera configuration
+      camera_transform:
+        parent_frame: "base_link" # Parent frame of the camera
+        x: 0.1 # Translation in x (m)
+        y: 0.0 # Translation in y (m)
+        z: 0.03 # Translation in z (m)
+        roll: -1.57079632679 # Rotation around x (rad)
+        pitch: 0.0 # Rotation around y (rad)
+        yaw: -1.57079632679 # Rotation around z (rad)
+
+# Specific Parameters for each drone
+# MAVROS connection to ArduPilot SITL. sim_vehicle.py instance N must be
+# started with --out=udp:127.0.0.1:<port>, see sitl_config/launch_ardupilot_sitl.bash
+drone0:
+  mavros/mavros_node:
+    ros__parameters:
+      fcu_url: "udp://:14551@127.0.0.1:14555"
+      tgt_system: 1 # Target system ID = SITL instance + 1
+
+drone1:
+  mavros/mavros_node:
+    ros__parameters:
+      fcu_url: "udp://:14561@127.0.0.1:14565"
+      tgt_system: 2
+
+drone2:
+  mavros/mavros_node:
+    ros__parameters:
+      fcu_url: "udp://:14571@127.0.0.1:14575"
+      tgt_system: 3

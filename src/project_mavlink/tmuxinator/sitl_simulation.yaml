@@ -1,0 +1,23 @@
+<%
+# Input parameters
+drone_namespace  = @settings["drone_namespace"]
+config_file      = @settings["config_file"]
+%>
+
+name: ardupilot_sitl
+attach: false
+root: ./
+windows:
+  # Gazebo has to be running before the ArduPilot SITL instances connect to
+  # the JSON FDM port, run_instance.py waits for it.
+  - gazebo:
+      layout:
+      panes:
+        - ./sitl_config/ardupilot/launch_gazebo.bash <%= config_file %>
+
+  - ardupilot_sitl:
+      layout: tiled
+      panes:
+      <%- drone_namespace.split(',').each do |drone| %>
+        - python3 sitl_config/ardupilot/run_instance.py -p <%= config_file %> -n <%= drone %>
+      <%- end %>

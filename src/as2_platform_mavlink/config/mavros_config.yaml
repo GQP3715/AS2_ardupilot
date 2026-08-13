@@ -1,0 +1,40 @@
+# MAVROS configuration for ArduPilot SITL.
+#
+# The FCU URL binds a local UDP port and points at the port MAVProxy (started
+# by sim_vehicle.py) forwards MAVLink to:
+#
+#   sim_vehicle.py ... --out=udp:127.0.0.1:14551
+#
+# gives "udp://:14551@127.0.0.1:14555" here. Instance N of sim_vehicle uses
+# system id N+1.
+/**:
+  ros__parameters:
+    gcs_url: "" # URL for the GCS
+    tgt_component: 1 # Target component ID
+    log_output: "screen" # Logging output type
+    fcu_protocol: "v2.0" # Protocol version for the FCU
+    respawn_mavros: "false" # Respawn mavros node if it dies
+
+drone0:
+  mavros/mavros_node:
+    ros__parameters:
+      fcu_url: "udp://:14551@127.0.0.1:14555" # ArduPilot SITL instance 0
+      tgt_system: 1 # Target system ID = SITL instance + 1
+
+drone1:
+  mavros/mavros_node:
+    ros__parameters:
+      fcu_url: "udp://:14561@127.0.0.1:14565" # ArduPilot SITL instance 1
+      tgt_system: 2
+
+drone2:
+  mavros/mavros_node:
+    ros__parameters:
+      fcu_url: "udp://:14571@127.0.0.1:14575" # ArduPilot SITL instance 2
+      tgt_system: 3
+
+drone3:
+  mavros/mavros_node:
+    ros__parameters:
+      fcu_url: "udp://:14581@127.0.0.1:14585" # ArduPilot SITL instance 3
+      tgt_system: 4
