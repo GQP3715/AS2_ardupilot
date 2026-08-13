@@ -169,10 +169,8 @@ if __name__ == '__main__':
         use_sim_time=use_sim_time,
         verbose=verbosity)
 
-    success = drone_start(uav)
-    if success:
-        success = drone_run(uav)
-    success = drone_end(uav)
+    success = drone_start(uav) and drone_run(uav)
+    success = success and drone_end(uav)
 
     uav.shutdown()
     rclpy.shutdown()
