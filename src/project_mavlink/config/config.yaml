@@ -47,9 +47,10 @@
   # controller runs in bypass mode and forwards the references untouched:
   # ArduPilot's own position controller does the tracking. The plugin below is
   # only loaded as a fallback and is not used while bypass is active.
+  # Note: bypass is automatic via ControllerHandler::tryToBypassController(),
+  # triggered by the platform's advertised modes matching the request.
   controller_manager:
-    ros__parameters:
-      use_bypass: true
+    ros__parameters: {}
 
   # Behaviors Motion
   TakeoffBehavior:
