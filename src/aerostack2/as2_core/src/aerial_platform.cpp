@@ -200,8 +200,10 @@ bool AerialPlatform::setArmingState(bool state)
 {
   if (state == platform_info_msg_.armed && state == true) {
     RCLCPP_WARN(this->get_logger(), "UAV is already armed");
+    return true;
   } else if (state == platform_info_msg_.armed && state == false) {
     RCLCPP_WARN(this->get_logger(), "UAV is already disarmed");
+    return true;
   } else {
     if (ownSetArmingState(state)) {
       platform_info_msg_.armed = state;
@@ -213,16 +215,18 @@ bool AerialPlatform::setArmingState(bool state)
       return true;
     }
     RCLCPP_WARN(this->get_logger(), "Unable to set arming state %s", state ? "ON" : "OFF");
+    return false;
   }
-  return false;
 }
 
 bool AerialPlatform::setOffboardControl(bool offboard)
 {
   if (offboard == platform_info_msg_.offboard && offboard == true) {
     RCLCPP_WARN(this->get_logger(), "UAV is already in OFFBOARD mode");
+    return true;
   } else if (offboard == platform_info_msg_.offboard && offboard == false) {
     RCLCPP_WARN(this->get_logger(), "UAV is already in MANUAL mode");
+    return true;
   } else {
     if (ownSetOffboardControl(offboard)) {
       platform_info_msg_.offboard = offboard;

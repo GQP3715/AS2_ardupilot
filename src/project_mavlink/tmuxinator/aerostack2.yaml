@@ -7,6 +7,7 @@ rosbag                    = @settings["rosbag"] == "true"
 name: <%= drone_namespace %>
 attach: false
 root: ./
+pre_window: source /root/ardupilot_as2_ws/install/setup.bash; source /opt/ros/humble/setup.bash
 startup_window: mission_monitoring
 windows:
   # Zenoh

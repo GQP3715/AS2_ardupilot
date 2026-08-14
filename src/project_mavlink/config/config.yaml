@@ -49,8 +49,6 @@
   # only loaded as a fallback and is not used while bypass is active.
   # Note: bypass is automatic via ControllerHandler::tryToBypassController(),
   # triggered by the platform's advertised modes matching the request.
-  controller_manager:
-    ros__parameters: {}
 
   # Behaviors Motion
   TakeoffBehavior:

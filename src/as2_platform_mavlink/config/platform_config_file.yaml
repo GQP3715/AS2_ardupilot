@@ -35,7 +35,7 @@
     arm_on_offboard: false
 
     connection:
-      timeout: 2.0  # s without MAVROS state before the platform reports disconnected
+      timeout: 8.0  # s without MAVROS state before the platform reports disconnected
 
     control:
       command_timeout: 0.5  # s, stop streaming setpoints if references get older
