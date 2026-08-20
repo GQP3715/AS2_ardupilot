@@ -72,21 +72,39 @@
       follow_path_plugin_name: "follow_path_plugin_trajectory"
 
   # Trajectory generation
-  TrajectoryGeneratorBehavior:
-    ros__parameters:
-      plugin_name: "jerk_limited_trajectory_generator"
-      desired_frame_id: "odom"
+  #TrajectoryGeneratorBehavior:
+   # ros__parameters:
+   #   plugin_name: "jerk_limited_trajectory_generator"
+     # desired_frame_id: "odom"
       # One setpoint per cycle: the platform re-streams the latest reference at
       # cmd_freq. Raise sampling_n (and keep platform trajectory.sampling_dt in
       # sync) to let the platform interpolate a short horizon instead.
+     # sampling_n: 1
+     # sampling_dt: 0.01
+     # jerk_limited_trajectory_generator:
+      #  limits:
+       #   max_speed: 1.0  # m/s
+       #   max_acceleration: 2.0  # m/s^2, keep below the ArduPilot WPNAV limits
+       #   max_jerk: 5.0  # m/s^3
+      # Trajectory generation
+  TrajectoryGeneratorBehavior:
+    ros__parameters:
+      plugin_name: "gcopter_trajectory_generator"
+      desired_frame_id: "odom"
       sampling_n: 1
       sampling_dt: 0.01
+      gcopter_trajectory_generator:
+        drone:
+          mass: 1.5
+          gravity: 9.81
+        limits:
+          max_velocity: 1.0
+          max_tilt_angle: 0.785
       jerk_limited_trajectory_generator:
         limits:
-          max_speed: 1.0  # m/s
-          max_acceleration: 2.0  # m/s^2, keep below the ArduPilot WPNAV limits
-          max_jerk: 5.0  # m/s^3
-
+          max_speed: 1.0
+          max_acceleration: 2.0
+          max_jerk: 5.0
   # Hardware Interfaces
   usb_camera_interface:
     ros__parameters:
