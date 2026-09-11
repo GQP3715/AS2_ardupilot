@@ -1,228 +1,213 @@
-# Aerostack2 + ArduPilot integration — implementation notes
+# HANDOFF — exact current state, as of project pause
 
-## A. Final architecture
+This document is written for whoever picks this project up next. It is
+deliberately precise about what is *actually true in the repository right
+now*, separate from what was tested locally and never committed, and
+separate from what was discussed but never done. Every claim below was
+checked against the actual source at handoff time — not recalled from
+memory — so it should be trustworthy as a starting point.
 
-```
-mission_*.py  (as2_python_api)
-      v
-Behaviors: Takeoff / GoTo / FollowPath / Land  +  TrajectoryGeneratorBehavior
-      v   motion_reference/trajectory   (position, velocity, acceleration, yaw @ <ns>/odom, ENU)
-as2_motion_controller  -- BYPASS: platform advertises TRAJECTORY, so the plugin is not used
-      v   actuator_command/trajectory
-as2_platform_mavlink (MavlinkPlatform)
-      v   mavros/setpoint_raw/local  (mavros_msgs/PositionTarget, ENU)
-MAVROS  -- converts ENU->NED, forwards coordinate_frame + type_mask untouched
-      v   SET_POSITION_TARGET_LOCAL_NED  (pos + vel + accel + yaw, MAV_FRAME_LOCAL_NED)
-ArduPilot Copter, GUIDED mode  (its own position controller does the tracking)
-      v
-Gazebo (ardupilot_gazebo, JSON FDM)
-```
+## 1. What is proven, with evidence
 
-Takeoff / land / hover / emergency are commanded out of band:
-`mavros/cmd/takeoff` (MAV_CMD_NAV_TAKEOFF), `mavros/cmd/land` (MAV_CMD_NAV_LAND),
-`mavros/set_mode` (GUIDED / LOITER / BRAKE), `mavros/cmd/command`
-(MAV_CMD_COMPONENT_ARM_DISARM, param2 = 21196, for the kill switch).
+- **Full flight cycle works**: connect -> arm -> GUIDED -> takeoff ->
+  trajectory -> land -> disarm, verified repeatedly against recorded flight
+  data (bag files), not just "the mission printed success."
+- **GCOPTER (MINCO-based trajectory smoothing) is integrated and measurably
+  better than Aerostack2's stock `jerk_limited_trajectory_generator`** on
+  the same waypoints, same commanded speed: faster completion (46.7s vs
+  54.7s) and roughly half the jerk (smoothness proxy), at a small (~3cm)
+  cost in mean position accuracy. This comparison is reproducible with
+  `compare_trajectories.py`.
+- **3D multi-level flight works**: the drone can climb, descend, and move
+  laterally between waypoints at different heights, in the correct
+  commanded order, confirmed by matching full 3D position (not altitude
+  alone) against each waypoint.
+- **Straight-line and takeoff/land accuracy: 3-9 cm**, consistently.
+- **Two real bugs found and fixed in Aerostack2's own core**
+  (`as2_core/src/aerial_platform.cpp`), not ArduPilot-specific: idempotent
+  no-op calls to `setArmingState()` / `setOffboardControl()` (e.g.
+  disarming an already-disarmed vehicle) previously returned `false`
+  (failure) instead of `true`, misleading any caller into thinking
+  something failed. **These are fixed in this repo** (verified: both
+  functions now `return true;` on the matching-state branches). This is a
+  good candidate for a small, self-contained upstream PR to Aerostack2,
+  independent of anything ArduPilot-specific — Aerostack2's maintainers
+  have been informally made aware this project exists and have offered to
+  review contributions (no PR has actually been opened yet).
 
-**aerostack2 itself is unmodified.** The seam used is
-`ControllerHandler::tryToBypassController()`: when the platform advertises the
-requested mode, the controller republishes the reference untouched. That is what
-lets a full `as2_msgs/TrajectorySetpoints` (position + twist + acceleration + yaw)
-reach the platform intact, so no second position loop is added on top of
-ArduPilot's.
+## 2. What is NOT done — verified against the actual repo, not assumed
 
-### Coordinate frames (verified)
+- **GCOPTER tuning was never applied.** `config/config.yaml`'s
+  `gcopter_trajectory_generator` block currently has only `drone.mass`,
+  `drone.gravity`, `limits.max_velocity`, `limits.max_tilt_angle`. It has
+  **no** `waypoints.waypoint_margin`, `waypoints.waypoint_anchor_radius`,
+  or `optimization.corridor_margin`. Per the plugin's own C++ (see
+  `readConfigParameters()` in
+  `as2_behaviors_trajectory_generation/.../gcopter_trajectory_generator.cpp`),
+  omitting these means the anchor/corridor tightening mechanism is
+  **effectively disabled** — every result recorded so far was flown
+  without it. This is the most likely single highest-leverage next step;
+  see Section 4.
+- **The vehicle mass in config is `1.5` kg, not the corrected `1.6` kg.**
+  `1.5` is only the `base_link` mass in the Gazebo `iris_with_standoffs`
+  model; the four rotor links each add `0.025` kg
+  (`1.5 + 4*0.025 = 1.6`). This was identified but the config was never
+  updated with the corrected total. Low impact, easy fix, listed for
+  completeness.
+- **`max_velocity` in config is `10.0`** (real ArduPilot `WP_SPD` value,
+  pulled live from SITL params), but **all recorded validation runs used
+  mission speed `1.0 m/s`** (the `SPEED` constant in
+  `mission_trajectory.py`), not the higher config ceiling. The two are
+  independent: `max_velocity` is GCOPTER's planning ceiling,`SPEED` is
+  what the mission actually commands. Nothing is broken here, just worth
+  knowing they aren't the same number.
+- **The FSM-sync fix was discussed at length but never applied.**
+  `mavlinkStateCb()` in `as2_platform_mavlink/src/mavlink_platform.cpp`
+  still unconditionally does `platform_info_msg_.set__armed(msg->armed)`
+  with no call to `handleStateMachineEvent()`. Since ArduPilot
+  autonomously disarms after landing (no service call from this code),
+  the internal `PlatformStateMachine` can desync from reality after the
+  first autonomous disarm, producing harmless-but-real
+  `Invalid transition: LANDED -> ARM`-style warnings on repeated runs.
+  **This does not block missions** — confirmed by 5+ consecutive
+  successful runs with this exact gap present. Low priority; the intended
+  fix (guard on `msg->armed != platform_info_msg_.armed`, fire
+  ARM/DISARM accordingly) was designed but never written into the file.
+- **`mission.py` and `mission_gps.py` still have the unsafe shutdown
+  pattern** that was found and fixed in `mission_trajectory.py` but never
+  back-ported to these two:
+  ```python
+  success = drone_start(uav) and drone_run(uav)
+  success = success and drone_end(uav)
+  ```
+  Because of Python's short-circuit evaluation, if `drone_start()` or
+  `drone_run()` returns `False` **while the vehicle is armed and
+  flying**, `drone_end()` (which lands and disarms) is never called at
+  all. `mission_trajectory.py` was fixed to always attempt `drone_end()`
+  regardless of earlier failures; `mission.py` and `mission_gps.py` were
+  never updated to match. **This is a real safety gap, worth fixing
+  before either of those two scripts is used again.** The fix:
+  ```python
+  success = drone_start(uav)
+  if success:
+      success = drone_run(uav)
+  landed_ok = drone_end(uav)  # always attempt, regardless of prior failure
+  success = success and landed_ok
+  ```
+- **No obstacle avoidance exists.** No JPS3D integration, no voxel map, no
+  obstacles placed in the simulator. Every waypoint in every test was
+  hand-typed in `mission_trajectory.py`. Aerostack2's own built-in path
+  planner (`as2_behaviors_path_planning`, A*/Voronoi) was evaluated and
+  ruled out early — its `GraphSearcher`/`CellNode` types are hardcoded to
+  `Point2i` throughout, genuinely 2D at the type level, not just by
+  convention, confirmed by reading the source. JPS3D was the intended
+  replacement per the original project scope; none of that work started.
 
-| Stage | Frame |
-|---|---|
-| `mavros/local_position/odom` | ENU at the ArduPilot **EKF origin** |
-| Platform relabels it to | `<ns>/odom` (AS2 odom frame) |
-| Controller output frame (LOCAL_ENU) | `<ns>/odom` — same frame, no transform needed |
-| Published `PositionTarget` | **ENU**, `coordinate_frame = FRAME_LOCAL_NED (1)` |
-| MAVROS `setpoint_raw` `local_cb` | applies `transform_frame_enu_ned` to position, velocity, acceleration, yaw and yaw_rate |
-| ArduPilot | NED relative to the EKF origin |
+## 3. Known issues and quirks — save yourself the rediscovery time
 
-So the platform must **not** pre-convert to NED. `FRAME_BODY_NED` /
-`FRAME_BODY_OFFSET_NED` are deliberately never used (MAVROS applies the same
-ENU→NED rotation to them, which is wrong — mavros issue #801).
+- **Gazebo real-time factor is unstable with the GUI attached on this
+  development machine.** Measured RTF with the GUI open, nothing else
+  running: 0.37-0.48 (should be ~1.0). Headless (`gz sim ... -s`) was
+  consistently reliable throughout this project and is the assumed mode
+  for everything documented here. If you re-enable the GUI, re-verify RTF
+  with `gz topic -e -t /world/iris_runway/stats -n 5` before trusting any
+  result — a bad RTF run produces symptoms (disconnects, visual glitching,
+  jerky recorded trajectories) that look like code bugs but aren't.
+- **`ros2 bag record` needs `< /dev/null` or it silently hangs.** It
+  listens for spacebar (pause/resume); run in the background without
+  redirecting stdin and the shell freezes the job the moment it tries to
+  read the keyboard, producing an empty or truncated bag with no error.
+  Always: `ros2 bag record -o name TOPIC < /dev/null &`.
+- **`tmuxinator/aerostack2.yaml` does not source the workspace itself** —
+  it relies on the invoking shell already having
+  `install/setup.bash` sourced. If a fresh shell/terminal reports
+  "Package not found," this is almost always why.
+- **`launch_sitl.bash` uses paths relative to `project_mavlink`** — it
+  must be run from inside that directory, not the workspace root.
+- **The custom YAML parameter parser in `as2_core` will crash on
+  malformed structure**, e.g. an empty `{}` block or mixed comment/code
+  indentation. `config.yaml` has been hand-edited many times during this
+  project and has a leftover fully-commented block near
+  `TrajectoryGeneratorBehavior` — it's inert (every line starts with `#`)
+  but if you edit that section again, be careful with indentation; this
+  file has broken the whole launch more than once from a stray space.
+- **MAVROS's `ANGLE_MAX` naming doesn't exist on this ArduPilot version**
+  — the real parameter is `ATC_ANGLE_MAX` (and `PSC_ANGLE_MAX`, which
+  reads `0.0` meaning "deferred to ATC_ANGLE_MAX"). If pulling other live
+  ArduPilot parameters, don't assume older documentation's naming;
+  confirm with `ros2 param list /drone0/mavros/param | grep -i <term>`
+  first.
+- **`mavros/param/get` (the deprecated single-param service) is not
+  exposed by this MAVROS build** — calling it hangs forever waiting for a
+  service that will never appear. Use the standard ROS 2 parameter
+  interface instead: `ros2 param get /drone0/mavros/param <NAME>`.
 
-`type_mask` values used (0 = use the field):
-* TRAJECTORY + yaw angle → `IGNORE_YAW_RATE` only (pos+vel+accel+yaw)
-* POSITION → `IGNORE_V* | IGNORE_AF* | IGNORE_YAW_RATE`
-* SPEED → `IGNORE_P* | IGNORE_AF* | (IGNORE_YAW or IGNORE_YAW_RATE)`
-* HOVER → position-only hold at the pose latched when the mode was set
+## 4. Recommended next steps, in order
 
-## B. Files
+1. **Apply the GCOPTER tuning that was identified but never applied.**
+   Add to `config/config.yaml` under `gcopter_trajectory_generator:`:
+   ```yaml
+   waypoints:
+     waypoint_margin: 0.15
+     waypoint_anchor_radius: 0.4
+   optimization:
+     corridor_margin: 0.5
+   ```
+   These starting values are reasoned estimates (tighter than the ~0.4m
+   average error measured without them), not independently validated —
+   treat the first re-test as calibration, not confirmation. Re-run the
+   full validation (bag record + `analyze_trajectory.py`) at the *same*
+   speed/radius as prior tests and compare directly against the numbers
+   in Section 1.
+2. **Back-port the shutdown-safety fix** to `mission.py` and
+   `mission_gps.py` (Section 2) — small, low-risk, closes a real gap.
+3. **Investigate the waypoint-density-vs-scale finding.** During testing,
+   increasing a circle's radius from 2m to 20m while keeping a fixed
+   8-waypoint count degraded path shape significantly (a rounded polygon
+   instead of a circle) — increasing to 30 waypoints fixed it. The
+   robust fix is to make `build_helix()`'s waypoint count scale with the
+   path's arc length automatically, rather than a fixed constant. This
+   was identified but not implemented.
+4. **Obstacle-in-Gazebo test, before touching JPS3D.** Place one static
+   obstacle at a known position in the Gazebo world, hand-write 3-4
+   waypoints in a copy of `mission_trajectory.py` that route around it,
+   validate the flown path keeps real clearance. This proves the
+   "obstacle + smooth trajectory" combination works before adding an
+   automated planner on top of it.
+5. **Build JPS3D against a static voxel map**, entirely offline — no
+   ROS/Gazebo needed for this step, per the original project scope.
+   Obstacles and waypoints are assumed known in advance (this project
+   deliberately does not target live/real-time obstacle perception).
+6. **Wire JPS3D's output into GCOPTER**, replacing the hand-typed
+   waypoints in the mission script with the planner's automatically
+   generated path.
 
-```
-modified:
-- as2_platform_mavlink/include/as2_platform_mavlink/mavlink_platform.hpp   (full rewrite)
-- as2_platform_mavlink/src/mavlink_platform.cpp                            (full rewrite)
-- as2_platform_mavlink/config/platform_config_file.yaml   (new ArduPilot parameters)
-- as2_platform_mavlink/config/control_modes.yaml          (drop ACRO/ATTITUDE, add HOVER + TRAJECTORY)
-- as2_platform_mavlink/config/mavros_config.yaml          (ArduPilot SITL UDP ports)
-- as2_platform_mavlink/launch/mavros_launch.py            (autopilot arg -> apm_config/apm_pluginlists)
-- as2_platform_mavlink/CMakeLists.txt                     (build autopilot_profile.cpp)
-- project_mavlink/config/config.yaml                      (platform/behavior/mavros retarget)
-- project_mavlink/tmuxinator/aerostack2.yaml              (autopilot:=ardupilot)
-- project_mavlink/tmuxinator/sitl_simulation.yaml         (Gazebo + ArduPilot SITL)
-- project_mavlink/launch_sitl.bash                        (ArduPilot SITL session)
-- project_mavlink/stop_tmuxinator_sitl.bash
-- project_mavlink/mission.py, mission_gps.py              (offboard before arm)
+## 5. Validation methodology — reuse this, it's the project's real asset
 
-created:
-- as2_platform_mavlink/include/as2_platform_mavlink/autopilot_profile.hpp
-- as2_platform_mavlink/src/autopilot_profile.cpp
-- project_mavlink/sitl_config/ardupilot/world.yaml
-- project_mavlink/sitl_config/ardupilot/launch_gazebo.bash
-- project_mavlink/sitl_config/ardupilot/run_instance.py
-- project_mavlink/mission_trajectory.py
+`analyze_trajectory.py` and `compare_trajectories.py` are the accumulated
+result of several rounds of fixing real bugs in the analysis itself (not
+just the flight code) — an accel-proxy index-misalignment bug, a
+worst-case/best-case miss-distance inversion, a crash on incomplete
+traces, and a waypoint-matching blind spot that ignored horizontal
+position entirely and only checked altitude. Each was caught by writing a
+small reproducible test case, not by inspection alone. If extending these
+scripts, keep that habit — write a synthetic test for the new logic
+before trusting its output on real flight data.
 
-deleted:
-- none   (sitl_config/docker/* is the legacy PX4 path, left untouched but unused)
-```
+## 6. A note on process
 
-### Why each incompatibility mattered
-
-1. **`mode == "OFFBOARD"`** in the state callback → with ArduPilot `offboard`
-   stayed false forever, so `AerialPlatform::sendCommand()` returned early.
-   *This is the "arms but does not move" failure.* Now the offboard mode name
-   comes from the autopilot profile (`GUIDED`).
-2. **No `ownTakeoff`/`ownLand`** → ArduPilot Copter does not leave the ground in
-   GUIDED from position/velocity setpoints; it needs MAV_CMD_NAV_TAKEOFF.
-3. **ACRO advertised** → ArduPilot documents SET_ATTITUDE_TARGET body rates as
-   not supported. Removed.
-4. **ATTITUDE thrust normalised by `max_thrust`** → ArduPilot reads that field as
-   a *climb rate* (0.5 = hold) unless `GUID_OPTIONS` bit 3 is set. ATTITUDE is
-   now refused with an explanatory error unless
-   `attitude_thrust_semantics: normalized_thrust` is set.
-5. **No TRAJECTORY mode** → smooth trajectories were flattened into PID-generated
-   velocity commands, duplicating ArduPilot's own controller.
-6. **`sendCommand()` override streamed body rates while disarmed** (a PX4 idiom
-   for keeping OFFBOARD alive) and bypassed the base-class safety gating. The
-   override is gone; the base class gating is used.
-7. **`px4_config.yaml` / `px4_pluginlists.yaml`** → replaced by the `apm_*` files.
-8. **PX4 UDP ports and PX4 SITL docker** → ArduPilot SITL + `ardupilot_gazebo`.
-9. **Vehicle type never declared** → `vehicle_type: copter`, validated at startup
-   (fixed wing/VTOL are rejected with an explicit message).
-
-### Safety / state logic added
-
-* Platform starts **disconnected**; `connected` follows the MAVROS heartbeat and
-  a watchdog (`connection.timeout`) clears it if state messages stop.
-* Arming is refused without a connection or without a local position (no EKF
-  origin ⇒ GUIDED setpoints would be rejected), and GUIDED is entered *before*
-  arming so ArduPilot's arming checks are meaningful.
-* `control.command_timeout`: if references go stale the setpoint stream stops and
-  ArduPilot brakes (its own 3 s rule) instead of flying on an outdated command.
-* `ownStopPlatform` switches to BRAKE once (not once per command cycle).
-* Blocking takeoff/land use a dedicated callback group + executor, so autopilot
-  feedback (and therefore AS2 odometry and TF) keeps flowing while waiting.
-
-## C. Build
-
-```bash
-# workspace layout: ~/as2_ws/src/{aerostack2,as2_platform_mavlink,project_mavlink}
-sudo apt install ros-humble-mavros ros-humble-mavros-extras
-wget https://raw.githubusercontent.com/mavlink/mavros/ros2/mavros/scripts/install_geographiclib_datasets.sh
-chmod +x install_geographiclib_datasets.sh && sudo ./install_geographiclib_datasets.sh
-
-cd ~/as2_ws
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install --packages-up-to as2_platform_mavlink
-source install/setup.bash
-```
-
-## D. Launch
-
-```bash
-# terminal 1 — Gazebo + ArduPilot SITL (needs ardupilot_gazebo env vars)
-cd ~/as2_ws/src/project_mavlink && ./launch_sitl.bash
-
-# terminal 2 — Aerostack2 + MAVROS for drone0
-./launch_as2.bash -n drone0
-
-# terminal 3 — mission
-python3 mission_trajectory.py -n drone0
-```
-
-Environment needed by `sitl_config/ardupilot/launch_gazebo.bash`:
-
-```bash
-export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ardupilot_gazebo/build:$GZ_SIM_SYSTEM_PLUGIN_PATH
-export GZ_SIM_RESOURCE_PATH=$HOME/ardupilot_gazebo/models:$HOME/ardupilot_gazebo/worlds:$GZ_SIM_RESOURCE_PATH
-```
-
-Keep `use_sim_time` **false**: nothing publishes `/clock` in this stack.
-
-## E. Test commands
-
-```bash
-# 1 connection
-ros2 topic echo /drone0/mavros/state --once          # connected: true, mode: STABILIZE/GUIDED
-# 2 state feedback
-ros2 topic echo /drone0/sensor_measurements/odom --once
-ros2 topic echo /drone0/platform/info --once         # connected/armed/offboard
-ros2 run tf2_ros tf2_echo drone0/odom drone0/base_link
-# 3-4 arm + mode
-ros2 service call /drone0/platform/set_offboard_mode std_srvs/srv/SetBool "{data: true}"
-ros2 service call /drone0/platform/set_arming_state std_srvs/srv/SetBool "{data: true}"
-# 5 takeoff
-ros2 service call /drone0/platform/takeoff std_srvs/srv/SetBool "{data: true}"
-# 6-8 trajectory: what actually leaves the platform and what ArduPilot echoes back
-ros2 topic echo /drone0/actuator_command/trajectory
-ros2 topic hz   /drone0/mavros/setpoint_raw/local     # ~= cmd_freq (50 Hz)
-ros2 topic echo /drone0/mavros/setpoint_raw/local --once
-ros2 topic echo /drone0/mavros/setpoint_raw/target_local --once   # ArduPilot's accepted target
-# 9 cancel
-ros2 action list | grep -i trajectory                 # then cancel the goal
-# 10 land
-ros2 service call /drone0/platform/land std_srvs/srv/SetBool "{data: true}"
-```
-
-In the MAVProxy console: `mode`, `arm throttle`, `status`, and
-`module load message` for raw MAVLink inspection.
-
-## F. Configuration summary
-
-`as2_platform_mavlink/config/platform_config_file.yaml` (overridable per project
-in `project_mavlink/config/config.yaml` under `platform:`):
-`autopilot`, `vehicle_type`, `modes.{offboard,manual,hold}`,
-`attitude_thrust_semantics`, `max_thrust`/`min_thrust`, `arm_on_offboard`,
-`connection.timeout`, `control.{command_timeout,mode_change_timeout}`,
-`takeoff.{height,height_tolerance,timeout,blocking}`, `land.timeout`,
-`trajectory.{send_acceleration,sampling_dt}`, `external_odom`, `cmd_freq`.
-
-**Known limitation:** `takeoff_plugin_platform` calls a `std_srvs/SetBool`
-service, which carries no payload, so the Takeoff *action* height is ignored —
-the height comes from `takeoff.height`. Keep it consistent with the missions.
-
-## G. Troubleshooting
-
-| Symptom | Cause / fix |
-|---|---|
-| `platform/info.connected: false` | MAVROS not linked. Check `fcu_url` vs the `--out` port of `sim_vehicle.py`; `ros2 topic echo /drone0/mavros/state`. |
-| Arms but does not move | Check `platform/info.offboard`; if false, `modes.offboard` does not match the reported mode string. Then check `mavros/setpoint_raw/local` is publishing and `setpoint_raw/target_local` echoes it. |
-| Refuses to arm | "no local position received" ⇒ EKF has no origin (GPS not ready). Wait for `mavros/local_position/odom`; check `EK3_SRC*` and the SITL GPS lock. |
-| GUIDED refused | ArduPilot rejects GUIDED without a position estimate; the mode-change wait times out with an explicit log. |
-| Takeoff command accepted, no climb | Not armed, or not in GUIDED; ArduPilot needs both before MAV_CMD_NAV_TAKEOFF. Some ArduPilot versions mis-handle the CommandTOL altitude — fall back to `mavros/cmd/command` MAV_CMD 22 with param7. |
-| Inverted altitude / mirrored motion | Something pre-converted ENU→NED. The platform must publish **ENU** with `FRAME_LOCAL_NED`; never use the BODY frames. |
-| Vehicle stops mid-trajectory every ~3 s | Setpoint stream dropped below 1 Hz, or `control.command_timeout` fired. Check `ros2 topic hz /drone0/mavros/setpoint_raw/local`. |
-| Motion is jerky | `trajectory.send_acceleration` off, or `cmd_freq` too low, or the generator's `max_acceleration` exceeds `WPNAV_ACCEL`. |
-| TF errors | State estimator not running or `use_gps`/origin not set; check `tf2_echo earth drone0/odom`. |
-| Gazebo not connecting | ArduPilot SITL instance N uses FDM ports 9002+10N; start Gazebo before SITL (run_instance.py already waits 5 s). |
-
-## Status / what is NOT verified
-
-* **Nothing was built or run.** This container has no ROS 2, no MAVROS, no
-  ArduPilot and no Gazebo. `src/autopilot_profile.cpp` compiles standalone with
-  g++ -Wall -Wextra; `mavlink_platform.cpp` has only been checked structurally
-  (header/implementation symbol match, brace/paren balance). All YAML files parse
-  and all Python/bash files pass syntax checks.
-* Therefore: run `colcon build` first and expect to fix small compile issues, then
-  work through tests 1–10 above. No claim is made that the vehicle flies.
-* MAVROS/ArduPilot API details were verified against the ArduPilot wiki
-  (Copter Commands in Guided Mode), the MAVROS `setpoint_raw` source and the
-  `mavros_msgs` message definitions — not against a running system.
-* The PX4 profile is preserved in intent but has not been re-validated.
-* Remaining nice-to-haves: update both READMEs, and a `ros2 bag` based tracking
-  error check for test 8.
+Large parts of this project's debugging were done with AI assistance
+(Claude, and separately GitHub Copilot). Both tools produced genuinely
+correct, load-bearing findings and genuinely wrong or overstated ones,
+roughly in equal measure, over the course of the project — including
+several cases where one tool's claim was checked against actual source
+code or a reproducible test and found to be incorrect. The discipline
+that made this workable was: **never accept a claim about the code
+without either reading the actual source it refers to, or running a
+reproducible test against real data.** Whoever continues this work should
+keep that habit — several real, load-bearing bugs in this codebase were
+only caught that way, and at least one confidently-stated "fix" (a
+plugin_denylist override that would have silently disabled ArduPilot
+safety-relevant MAVROS plugins) was caught and reverted before it caused
+real harm specifically because it was checked against the actual override
+semantics rather than trusted.
