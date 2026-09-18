@@ -4,3 +4,13 @@ log/
 build/
 install/
 log/
+*.tlog
+*.tlog.raw
+*.BIN
+LASTLOG.TXT
+eeprom.bin
+mav.parm
+__pycache__/
+*.pyc
+*.db3
+metadata.yaml
